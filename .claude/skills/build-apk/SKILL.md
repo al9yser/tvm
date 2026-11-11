@@ -7,6 +7,13 @@ description: Build the TVM Flutter app into an APK using GitHub Actions and fetc
 
 The sandbox has no Flutter SDK and no network for package installs, so the APK is always built in the cloud by `.github/workflows/build-apk.yml` (repo `al9yser/tvm`, public).
 
+## Output requirement (from the user)
+
+Deliver a single universal **APK** that works on both **phones and TV screens**. The user's chosen format is always APK. Keep these true for every app built from this template:
+- Manifest declares both `LAUNCHER` and `LEANBACK_LAUNCHER`, plus `android:banner` and a PNG launcher icon (so the icon shows on the TV home).
+- `touchscreen` and `leanback` features are `required="false"`.
+- UI is responsive (side rail on wide screens, bottom bar on phones) and every control is reachable with a TV remote (focusable, visible focus border).
+
 ## Steps
 
 1. Make code changes in a clone of `al9yser/tvm` (Flutter project is at the repo root; Dart code is `lib/main.dart`).
