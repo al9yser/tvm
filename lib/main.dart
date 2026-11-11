@@ -1182,14 +1182,23 @@ class _PlayerState extends State<PlayerPage> {
   Duration duration = Duration.zero;
   double speed = 1.0;
   double volume = 1.0;
+  BoxFit _fit = BoxFit.contain;
+  bool _dialogOpen = false;
   Timer? _hide;
   final _focus = FocusNode(debugLabel: 'player');
+  final _playBtn = FocusNode(debugLabel: 'play');
 
   bool get isLive => widget.item.kind == MediaKind.live;
 
   @override
   void initState() {
     super.initState();
+    // ملء الشاشة بالكامل: إخفاء أشرطة النظام وعدم وجود شريط علوي دائم.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
     _start();
   }
 
@@ -1225,21 +1234,38 @@ class _PlayerState extends State<PlayerPage> {
   void dispose() {
     _hide?.cancel();
     _focus.dispose();
+    _playBtn.dispose();
     _c?.dispose();
     SystemChrome.setPreferredOrientations([]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
   }
 
-  void _showControls() {
-    if (!mounted) return;
-    setState(() => controls = true);
+  void _resetHideTimer() {
     _hide?.cancel();
-    _hide = Timer(const Duration(seconds: 4), () {
-      if (mounted && _c?.value.isPlaying == true) {
-        setState(() => controls = false);
+    _hide = Timer(const Duration(seconds: 5), () {
+      if (mounted && !_dialogOpen && _c?.value.isPlaying == true) {
+        _hideControls();
       }
     });
+  }
+
+  void _showControls({bool focusBar = false}) {
+    if (!mounted) return;
+    setState(() => controls = true);
+    _resetHideTimer();
+    if (focusBar) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _playBtn.canRequestFocus) _playBtn.requestFocus();
+      });
+    }
+  }
+
+  void _hideControls() {
+    if (!mounted) return;
+    setState(() => controls = false);
+    _hide?.cancel();
+    _focus.requestFocus();
   }
 
   void _toggle() {
@@ -1249,9 +1275,15 @@ class _PlayerState extends State<PlayerPage> {
     _showControls();
   }
 
-  /// أزرار الريموت: OK = تشغيل/إيقاف، يمين/يسار = تقديم/تأخير 10 ثوانٍ، أعلى/أسفل = إظهار التحكم.
+  /// الريموت (والتركيز على الفيديو نفسه): OK = تشغيل/إيقاف، يمين/يسار = تقديم/تأخير 10 ثوانٍ،
+  /// أعلى/أسفل = إظهار أزرار التحكم والانتقال إليها.
+  /// عندما يكون التركيز على أحد الأزرار تعمل الأسهم للتنقل بين الأزرار بشكل طبيعي.
   KeyEventResult _onKey(FocusNode node, KeyEvent e) {
     if (e is! KeyDownEvent && e is! KeyRepeatEvent) return KeyEventResult.ignored;
+    if (!node.hasPrimaryFocus) {
+      if (controls) _resetHideTimer();
+      return KeyEventResult.ignored;
+    }
     final k = e.logicalKey;
     final down = e is KeyDownEvent;
     if (k == LogicalKeyboardKey.select ||
@@ -1285,7 +1317,7 @@ class _PlayerState extends State<PlayerPage> {
       return KeyEventResult.handled;
     }
     if (k == LogicalKeyboardKey.arrowUp || k == LogicalKeyboardKey.arrowDown) {
-      _showControls();
+      _showControls(focusBar: true);
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -1309,40 +1341,107 @@ class _PlayerState extends State<PlayerPage> {
     );
   }
 
-  void _fullscreen() {
-    final landscape =
-        MediaQuery.of(context).orientation == Orientation.landscape;
-    if (landscape) {
-      SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    } else {
-      SystemChrome.setPreferredOrientations([
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  String get _fitLabel => _fit == BoxFit.contain
+      ? 'أصلي'
+      : _fit == BoxFit.cover
+      ? 'ملء الشاشة'
+      : 'تمديد';
+
+  /// تبديل شكل العرض: أصلي ← ملء الشاشة (قص الأطراف) ← تمديد.
+  void _cycleFit() {
+    setState(() {
+      _fit = _fit == BoxFit.contain
+          ? BoxFit.cover
+          : _fit == BoxFit.cover
+          ? BoxFit.fill
+          : BoxFit.contain;
+    });
+    _resetHideTimer();
+  }
+
+  String _trackLabel(VideoAudioTrack t, int i) {
+    final parts = [
+      if ((t.label ?? '').isNotEmpty) t.label!,
+      if ((t.language ?? '').isNotEmpty) '(${t.language})',
+    ];
+    return parts.isEmpty ? 'مسار ${i + 1}' : parts.join(' ');
+  }
+
+  Future<void> _audioMenu() async {
+    final c = _c;
+    if (c == null || !ready) return;
+    _dialogOpen = true;
+    try {
+      List<VideoAudioTrack> tracks = const [];
+      try {
+        tracks = await c.getAudioTracks();
+      } catch (_) {}
+      if (!mounted) return;
+      if (tracks.length < 2) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('لا توجد مسارات صوت أخرى في هذا المحتوى'),
+          ),
+        );
+        return;
+      }
+      final id = await showDialog<String>(
+        context: context,
+        builder: (dc) => SimpleDialog(
+          title: const Text('الصوت واللغة'),
+          children: [
+            for (var i = 0; i < tracks.length; i++)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(dc, tracks[i].id),
+                child: Row(
+                  children: [
+                    Icon(
+                      tracks[i].isSelected
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_off,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(_trackLabel(tracks[i], i)),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      );
+      if (id != null) await c.selectAudioTrack(id);
+    } finally {
+      _dialogOpen = false;
+      if (mounted) _resetHideTimer();
     }
   }
 
-  Future<void> _unavailable(String name) async {
-    await showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text(name),
-        content: const Text(
-          'الخادم الحالي يعيد مساراً واحداً. ستظهر الخيارات المتعددة تلقائياً عند توفر مسارات جودة أو صوت أو ترجمة من الخادم.',
-        ),
-        actions: [
-          TextButton(
-            autofocus: true,
-            onPressed: () => Navigator.pop(context),
-            child: const Text('حسناً'),
-          ),
-        ],
+  Widget _btn(
+    IconData icon,
+    VoidCallback onTap, {
+    String? tip,
+    FocusNode? node,
+    double size = 28,
+  }) => IconButton(
+    focusNode: node,
+    tooltip: tip,
+    iconSize: size,
+    onPressed: onTap,
+    style: ButtonStyle(
+      // إطار واضح للزر المحدد بالريموت
+      side: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.focused)
+            ? const BorderSide(color: Colors.white, width: 2.5)
+            : null,
       ),
-    );
-    if (mounted) _focus.requestFocus();
-  }
+      backgroundColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.focused) ? Colors.white24 : null,
+      ),
+    ),
+    icon: Icon(icon),
+  );
 
   Widget _controls(VideoPlayerController v) {
     final max = duration.inMilliseconds == 0
@@ -1352,98 +1451,149 @@ class _PlayerState extends State<PlayerPage> {
         ? 0.0
         : position.inMilliseconds.clamp(0, duration.inMilliseconds).toDouble();
     return Positioned.fill(
-      child: ExcludeFocus(
-        // التحكم بالريموت يتم عبر _onKey؛ هذه الأزرار للمس فقط.
-        child: Container(
-          color: Colors.black38,
+      child: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.black87, Colors.transparent, Colors.black87],
+            stops: [0, .45, 1],
+          ),
+        ),
+        child: SafeArea(
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.end,
             children: [
+              // الشريط العلوي: رجوع + الاسم فوق الفيديو (لا يقتطع من مساحة الشاشة)
               Row(
-                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  if (!isLive)
-                    IconButton(
-                      onPressed: () => _seek(-10),
-                      icon: const Icon(Icons.replay_10, size: 32),
-                    ),
-                  IconButton(
-                    onPressed: _toggle,
-                    icon: Icon(
-                      v.value.isPlaying
-                          ? Icons.pause_circle_filled
-                          : Icons.play_circle_filled,
-                      size: 56,
+                  _btn(
+                    Icons.arrow_forward,
+                    () => Navigator.maybePop(context),
+                    tip: 'رجوع',
+                  ),
+                  Expanded(
+                    child: Text(
+                      widget.item.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
-                  if (!isLive)
-                    IconButton(
-                      onPressed: () => _seek(10),
-                      icon: const Icon(Icons.forward_10, size: 32),
-                    ),
                 ],
               ),
+              const Spacer(),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: isLive
-                    ? const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
+                    ? const Align(
+                        alignment: AlignmentDirectional.centerStart,
                         child: Text('● بث مباشر'),
                       )
-                    : Row(
-                        children: [
-                          Text(
-                            _time(position),
-                            style: const TextStyle(fontSize: 11),
-                          ),
-                          Expanded(
-                            child: Slider(
-                              value: value,
-                              max: max,
-                              onChanged: (x) =>
-                                  v.seekTo(Duration(milliseconds: x.round())),
+                    : Directionality(
+                        textDirection: TextDirection.ltr,
+                        child: Row(
+                          children: [
+                            Text(
+                              _time(position),
+                              style: const TextStyle(fontSize: 12),
                             ),
-                          ),
-                          Text(
-                            _time(duration),
-                            style: const TextStyle(fontSize: 11),
-                          ),
-                        ],
+                            Expanded(
+                              // السحب باللمس فقط؛ الريموت يقدّم/يؤخر بالأسهم.
+                              child: ExcludeFocus(
+                                child: Slider(
+                                  value: value,
+                                  max: max,
+                                  onChanged: (x) => v.seekTo(
+                                    Duration(milliseconds: x.round()),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Text(
+                              _time(duration),
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ],
+                        ),
                       ),
               ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  IconButton(
-                    onPressed: () {
-                      setState(() => volume = volume == 0 ? 1 : 0);
-                      v.setVolume(volume);
-                    },
-                    icon: Icon(
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+                child: Wrap(
+                  alignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 4,
+                  children: [
+                    if (!isLive)
+                      _btn(Icons.replay_10, () {
+                        _seek(-10);
+                        _resetHideTimer();
+                      }, tip: 'رجوع 10 ثوانٍ'),
+                    _btn(
+                      v.value.isPlaying
+                          ? Icons.pause_circle_filled
+                          : Icons.play_circle_filled,
+                      _toggle,
+                      node: _playBtn,
+                      size: 44,
+                      tip: 'تشغيل / إيقاف',
+                    ),
+                    if (!isLive)
+                      _btn(Icons.forward_10, () {
+                        _seek(10);
+                        _resetHideTimer();
+                      }, tip: 'تقديم 10 ثوانٍ'),
+                    _btn(
                       volume == 0 ? Icons.volume_off : Icons.volume_up,
+                      () {
+                        setState(() => volume = volume == 0 ? 1 : 0);
+                        v.setVolume(volume);
+                        _resetHideTimer();
+                      },
+                      tip: 'كتم الصوت',
                     ),
-                  ),
-                  PopupMenuButton<double>(
-                    initialValue: speed,
-                    onSelected: (x) {
-                      setState(() => speed = x);
-                      v.setPlaybackSpeed(x);
-                    },
-                    itemBuilder: (_) => [0.75, 1.0, 1.25, 1.5, 2.0]
-                        .map(
-                          (x) => PopupMenuItem(value: x, child: Text('${x}x')),
-                        )
-                        .toList(),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Text('${speed}x'),
+                    PopupMenuButton<double>(
+                      tooltip: 'السرعة',
+                      initialValue: speed,
+                      onOpened: () => _dialogOpen = true,
+                      onCanceled: () {
+                        _dialogOpen = false;
+                        _resetHideTimer();
+                      },
+                      onSelected: (x) {
+                        _dialogOpen = false;
+                        setState(() => speed = x);
+                        v.setPlaybackSpeed(x);
+                        _resetHideTimer();
+                      },
+                      itemBuilder: (_) => [0.75, 1.0, 1.25, 1.5, 2.0]
+                          .map(
+                            (x) =>
+                                PopupMenuItem(value: x, child: Text('${x}x')),
+                          )
+                          .toList(),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        child: Text(
+                          '${speed}x',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
                     ),
-                  ),
-                  IconButton(
-                    onPressed: _fullscreen,
-                    icon: const Icon(Icons.fullscreen),
-                  ),
-                ],
+                    _btn(Icons.aspect_ratio, _cycleFit, tip: 'العرض: $_fitLabel'),
+                    Text(
+                      _fitLabel,
+                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                    ),
+                    _btn(Icons.record_voice_over_outlined, _audioMenu, tip: 'الصوت واللغة'),
+                  ],
+                ),
               ),
             ],
           ),
@@ -1452,69 +1602,79 @@ class _PlayerState extends State<PlayerPage> {
     );
   }
 
+  /// الفيديو يملأ الشاشة كاملة على خلفية سوداء (بدون شريط علوي).
+  Widget _video(VideoPlayerController v) {
+    final s = v.value.size;
+    final w = s.width > 0 ? s.width : 1920.0;
+    final h = s.height > 0 ? s.height : 1080.0;
+    return SizedBox.expand(
+      child: FittedBox(
+        fit: _fit,
+        clipBehavior: Clip.hardEdge,
+        child: SizedBox(width: w, height: h, child: VideoPlayer(v)),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext c) {
     final v = _c;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.item.title),
-        actions: [
-          IconButton(
-            tooltip: 'الجودة',
-            onPressed: () => _unavailable('الجودة'),
-            icon: const Icon(Icons.hd_outlined),
-          ),
-          IconButton(
-            tooltip: 'الصوت واللغة',
-            onPressed: () => _unavailable('الصوت واللغة'),
-            icon: const Icon(Icons.record_voice_over_outlined),
-          ),
-          IconButton(
-            tooltip: 'الترجمة',
-            onPressed: () => _unavailable('الترجمة'),
-            icon: const Icon(Icons.closed_caption_outlined),
-          ),
-        ],
-      ),
-      body: Focus(
-        focusNode: _focus,
-        autofocus: true,
-        onKeyEvent: _onKey,
-        child: error != null
-            ? Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Text(
-                    'تعذر تشغيل المحتوى:\n$error',
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-              )
-            : (v == null || !ready)
-            ? const Center(child: CircularProgressIndicator())
-            : Center(
-                child: GestureDetector(
+    return PopScope(
+      // زر الرجوع: أول ضغطة تخفي أزرار التحكم، والثانية تخرج من المشغل.
+      canPop: !controls || error != null || v == null || !ready,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _hideControls();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Focus(
+          focusNode: _focus,
+          autofocus: true,
+          onKeyEvent: _onKey,
+          child: error != null
+              ? Stack(
+                  children: [
+                    Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Text(
+                          'تعذر تشغيل المحتوى:\n$error',
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      top: 12,
+                      right: 12,
+                      child: SafeArea(
+                        child: _btn(
+                          Icons.arrow_forward,
+                          () => Navigator.maybePop(context),
+                          tip: 'رجوع',
+                        ),
+                      ),
+                    ),
+                  ],
+                )
+              : (v == null || !ready)
+              ? const Center(child: CircularProgressIndicator())
+              : GestureDetector(
+                  behavior: HitTestBehavior.opaque,
                   onTap: () {
                     if (controls) {
-                      setState(() => controls = false);
+                      _hideControls();
                     } else {
                       _showControls();
                     }
                   },
                   child: Stack(
-                    alignment: Alignment.center,
                     children: [
-                      AspectRatio(
-                        aspectRatio: v.value.aspectRatio == 0
-                            ? 16 / 9
-                            : v.value.aspectRatio,
-                        child: VideoPlayer(v),
-                      ),
+                      _video(v),
                       if (controls) _controls(v),
                     ],
                   ),
                 ),
-              ),
+        ),
       ),
     );
   }
