@@ -735,6 +735,36 @@ class _CatalogState extends State<CatalogPage> {
     }
   }
 
+  /// تحديث يدوي من زر الشاشة أو بالسحب للأسفل مع حماية من الطلبات المتكررة.
+  Future<void> _refreshNow() async {
+    if (refreshing) return;
+    final gen = ++_gen;
+    setState(() {
+      refreshing = true;
+      error = null;
+    });
+    try {
+      final fresh = await widget.repo.refresh(kind);
+      if (!mounted || gen != _gen) return;
+      setState(() {
+        items = fresh;
+        refreshing = false;
+        _apply();
+      });
+    } catch (e) {
+      if (!mounted || gen != _gen) return;
+      setState(() => refreshing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'تعذر تحديث المحتوى: ${e.toString().replaceFirst('Exception: ', '')}',
+          ),
+          action: SnackBarAction(label: 'إعادة', onPressed: _refreshNow),
+        ),
+      );
+    }
+  }
+
   /// إعادة حساب القائمة المعروضة مرة واحدة عند تغير البيانات أو الفلتر (لا في كل بناء).
   void _apply() {
     final src = items ?? const <MediaItem>[];
@@ -856,21 +886,25 @@ class _CatalogState extends State<CatalogPage> {
         Expanded(
           child: view.isEmpty
               ? const Center(child: Text('لا يوجد محتوى'))
-              : GridView.builder(
-                  padding: const EdgeInsets.all(12),
-                  // عدد الأعمدة يتكيف مع حجم الشاشة (هاتف أو شاشة كبيرة).
-                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: 190,
-                    childAspectRatio: .62,
-                    crossAxisSpacing: 12,
-                    mainAxisSpacing: 14,
-                  ),
-                  itemCount: view.length,
-                  itemBuilder: (_, i) => _FocusCard(
-                    key: ValueKey('${view[i].kind.name}-${view[i].id}'),
-                    item: view[i],
-                    autofocus: i == 0,
-                    onTap: () => _open(view[i]),
+              : RefreshIndicator(
+                  onRefresh: _refreshNow,
+                  child: GridView.builder(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.all(12),
+                    // عدد الأعمدة يتكيف مع حجم الشاشة (هاتف أو شاشة كبيرة).
+                    gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                      maxCrossAxisExtent: 190,
+                      childAspectRatio: .62,
+                      crossAxisSpacing: 12,
+                      mainAxisSpacing: 14,
+                    ),
+                    itemCount: view.length,
+                    itemBuilder: (_, i) => _FocusCard(
+                      key: ValueKey('${view[i].kind.name}-${view[i].id}'),
+                      item: view[i],
+                      autofocus: i == 0,
+                      onTap: () => _open(view[i]),
+                    ),
                   ),
                 ),
         ),
@@ -885,6 +919,17 @@ class _CatalogState extends State<CatalogPage> {
       appBar: AppBar(
         title: Text(q.isEmpty ? title : '$title — «$q»'),
         actions: [
+          IconButton(
+            tooltip: 'تحديث المحتوى',
+            onPressed: refreshing ? null : _refreshNow,
+            icon: refreshing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh),
+          ),
           IconButton(
             tooltip: 'بحث',
             onPressed: _search,
